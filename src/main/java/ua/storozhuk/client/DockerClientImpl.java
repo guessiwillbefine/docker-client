@@ -3,8 +3,8 @@ package ua.storozhuk.client;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -18,24 +18,26 @@ import ua.storozhuk.dto.container.response.DockerContainerCreationResponse;
 import ua.storozhuk.dto.container.response.DockerContainerDto;
 import ua.storozhuk.dto.image.response.DockerImageDto;
 import ua.storozhuk.dto.image.response.DockerPrunedDto;
+import ua.storozhuk.utils.JsonUtils;
 
-import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-
 //TODO refactor this sh....
+//TODO also need some logic to attempt to connect after bean creation
 @Slf4j
 @Service
 public class DockerClientImpl implements DockerClient {
 
+    //TODO move label to app that will use this client
     private final String LABEL_VALUE = "label=worker=true";
+
+    /** Key in stream response data where we will be placed id of created container */
+    private final String ID_KEY = "aux";
 
     private final String DOCKER_ADDRESS;
 
@@ -59,59 +61,68 @@ public class DockerClientImpl implements DockerClient {
         DOCKER_ADDRESS = configurationSource.getHost() + "/" + configurationSource.getVersion() + "/";
     }
 
+    @PostConstruct
+    private void ping() throws IOException {
+        Request request = new Request.Builder()
+                .url(DOCKER_ADDRESS + "images/json")
+                .get()
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            log.info("Docker API initialized and connected successfully");
+        } catch (IOException e) {
+            log.error("Docker API is not accessible: ", e);
+            throw e;
+        }
+    }
 
     @Override
     public List<DockerImageDto> getAllImages() {
-        Response response = null;
-        //TODO Response implements closeable, need to remove closeIfNeeded
-        try {
-            Request request = new Request.Builder().url(DOCKER_ADDRESS + "images/json")
-                    .get()
-                    .build();
-            response = client.newCall(request).execute();
-            return readResponseBody(response, new TypeReference<>() {
-            });
+        Request request = new Request.Builder()
+                .url(DOCKER_ADDRESS + "images/json")
+                .get()
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+
+            return readResponseBody(response, new TypeReference<>() {});
+
         } catch (IOException e) {
             log.error("Something went wrong: ", e);
-        } finally {
-            closeIfNeeded(response);
         }
         return null;
     }
 
     @Override
     public List<DockerContainerDto> getAllContainers() {
-        Response response = null;
-        try {
-            Request request = new Request.Builder()
-                    .url(DOCKER_ADDRESS + "containers/json")
-                    .get()
-                    .build();
-            response = client.newCall(request).execute();
-            return readResponseBody(response, new TypeReference<>() {
-            });
+        Request request = new Request.Builder()
+                .url(DOCKER_ADDRESS + "containers/json")
+                .get()
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+
+            return readResponseBody(response, new TypeReference<>() {});
+
         } catch (IOException e) {
             log.error("Something went wrong: ", e);
-        } finally {
-            closeIfNeeded(response);
         }
         return null;
     }
 
     @Override
     public DockerContainerCreationResponse createContainer(String containerName, DockerContainerCreationDto creationDto) {
-        Response response = null;
-        try {
-            Request request = new Request.Builder()
-                    .header("Content-Type", "application/json")
-                    .post(requestBodyFrom(creationDto))
-                    .url(
-                            withRequestParams(
-                                    DOCKER_ADDRESS + "containers/create",
-                                    Map.of("name", containerName))
-                    )
-                    .build();
-            response = client.newCall(request).execute();
+        Request request = new Request.Builder()
+                .header("Content-Type", "application/json")
+                .post(requestBodyFrom(creationDto))
+                .url(
+                        withRequestParams(
+                                DOCKER_ADDRESS + "containers/create",
+                                Map.of("name", containerName))
+                )
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
             if (response.code() == 409) {
                 log.warn("Container already exists");
                 return null;
@@ -120,80 +131,75 @@ public class DockerClientImpl implements DockerClient {
             });
         } catch (IOException e) {
             log.error("Something went wrong:", e);
-        } finally {
-            closeIfNeeded(response);
         }
         return null;
     }
 
     @Override
     public DockerPrunedDto pruneImages() {
-        Response response = null;
-        try {
-            Request request = new Request.Builder()
-                    .post(RequestBody.create(new byte[]{}))
-                    .url(DOCKER_ADDRESS + "images/prune")
-                    .build();
-            response = client.newCall(request).execute();
+        Request request = new Request.Builder()
+                .post(RequestBody.create(new byte[]{}))
+                .url(DOCKER_ADDRESS + "images/prune")
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
             if (response.code() == 409) {
                 log.warn("Container already exists");
                 return null;
             }
-            return readResponseBody(response, new TypeReference<>() {
-            });
+            return readResponseBody(response, new TypeReference<>() {});
         } catch (IOException e) {
             log.error("Something went wrong:", e);
-        } finally {
-            closeIfNeeded(response);
         }
         return null;
     }
 
     @Override
     public String buildImage(String pathToProject, String containerName) {
-        Response response = null;
-        try {
+
+        File file = new File(pathToProject);
+
+        RequestBody requestBody = RequestBody.create(file, MediaType.parse("application/tar"));
+        Request request = new Request.Builder()
+                .post(requestBody)
+                .url(DOCKER_ADDRESS + "build")
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
             /*
               need to think where I will store code samples and how they will reach this client
               for now I will use this way, just to test if it works in general
              */
-            File file = new File(pathToProject);
+            List<Map.Entry<String, Object>> entries = JsonUtils.parseStreamingData(response.body().string());
+            Object aux = entries.stream()
+                    .filter(entry -> ID_KEY.equals(entry.getKey()))
+                    .map(Map.Entry::getValue)
+                    .filter(value -> value instanceof List)
+                    .map(value -> ((List<?>) value).stream().findFirst())
+                    .flatMap(Optional::stream)
+                    .map(entry -> ((Map.Entry<?, ?>) entry).getValue())
+                    .findFirst()
+                    .orElseThrow();
 
-            RequestBody requestBody = RequestBody.create(file, MediaType.parse("application/tar"));
-
-            Request request = new Request.Builder()
-                    .post(requestBody)
-                    .url(DOCKER_ADDRESS + "build")
-                    .build();
-            response = client.newCall(request).execute();
-            List<Map.Entry<String, Object>> entries = processStreamingData(response.body().string());
-            Object aux = ((Map.Entry<Object, Object>) ((List) entries.stream().filter(entry -> entry.getKey().equals("aux")).findFirst().orElseThrow().getValue()).stream().findFirst().orElseThrow()).getValue();
             entries.forEach(System.out::println);
             return (String) aux;
         } catch (IOException e) {
             log.error("Something went wrong:", e);
             return null;
-        } finally {
-            closeIfNeeded(response);
         }
     }
 
     @Override
     public void startContainer(String id) {
-        Response response = null;
-        try {
-            Request request = new Request.Builder()
-                    .url(DOCKER_ADDRESS + "containers/" + id + "/start")
-                    .post(RequestBody.create(new byte[]{}))
-                    .build();
-            response = client.newCall(request).execute();
+        Request request = new Request.Builder()
+                .url(DOCKER_ADDRESS + "containers/" + id + "/start")
+                .post(RequestBody.create(new byte[]{}))
+                .build();
+        try (Response ignored = client.newCall(request).execute()) {
+            log.debug(String.format("container %s started", id));
         } catch (IOException e) {
             log.error("Something went wrong:", e);
-        } finally {
-            closeIfNeeded(response);
         }
-
-
     }
 
     @Override
@@ -223,8 +229,8 @@ public class DockerClientImpl implements DockerClient {
                 .url(DOCKER_ADDRESS + "containers/prune?" + LABEL_VALUE)
                 .post(RequestBody.create(new byte[]{}))
                 .build();
-        try(Response response = client.newCall(request).execute()) {
-            //todo
+        try(Response ignored = client.newCall(request).execute()) {
+            //todo read response and log deleted ids
         } catch (IOException e) {
             log.error("Something went wrong:", e);
         }
@@ -236,24 +242,6 @@ public class DockerClientImpl implements DockerClient {
         } catch (IOException e) {
             log.error("Exception occurred during getting response body", e);
             return null;
-        }
-    }
-
-    private <T> T readResponseBodyString(String data, TypeReference<T> type) {
-        try {
-            return objectMapper.readValue(data, type);
-        } catch (IOException e) {
-            log.error("Exception occurred during getting response body", e);
-            return null;
-        }
-    }
-
-    private void closeIfNeeded(Closeable closeable) {
-        if (closeable == null) return;
-        try {
-            closeable.close();
-        } catch (IOException e) {
-            log.error("Error during closing connection: ", e);
         }
     }
 
@@ -274,52 +262,4 @@ public class DockerClientImpl implements DockerClient {
         }
     }
 
-    private List<Map.Entry<String, Object>> processStreamingData(String data) {
-        String[] split = data.split("\n");
-        List<Map.Entry<String, Object>> resultList = new ArrayList<>();
-
-        for (String jsonObject : split) {
-            try {
-                // Преобразуем строку JSON в JsonNode
-                JsonNode jsonNode = objectMapper.readTree(jsonObject);
-
-                // Итерируем по ключам и значениям и добавляем их в список
-                Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
-                while (fields.hasNext()) {
-                    Map.Entry<String, JsonNode> field = fields.next();
-                    resultList.add(new AbstractMap.SimpleEntry<>(field.getKey(), parseJsonNode(field.getValue())));
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-        return resultList;
-    }
-
-
-    private static Object parseJsonNode(JsonNode jsonNode) {
-        if (jsonNode.isObject()) {
-            List<Map.Entry<String, Object>> map = new ArrayList<>();
-            Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                map.add(new AbstractMap.SimpleEntry<>(field.getKey(), parseJsonNode(field.getValue())));
-            }
-            return map;
-        } else if (jsonNode.isArray()) {
-            List<Object> list = new ArrayList<>();
-            for (JsonNode arrayElement : jsonNode) {
-                list.add(parseJsonNode(arrayElement));
-            }
-            return list;
-        } else if (jsonNode.isTextual()) {
-            return jsonNode.asText();
-        } else if (jsonNode.isNumber()) {
-            return jsonNode.numberValue();
-        } else if (jsonNode.isBoolean()) {
-            return jsonNode.asBoolean();
-        } else {
-            return null;
-        }
-    }
 }
